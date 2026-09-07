@@ -262,6 +262,22 @@ Some examples of credentials:
 
 By default, the system allows the user to be connected only from a single machine. Which means if you try to connect using the same credentials from another machine, you will be disconnected on the first machine. 
 
+### OPTIONAL: connecting a local A3S service
+
+[A3S](a3s-service/README.md) is a local drop-in replacement for the external RL agent API,
+also able to project KPIs several timesteps ahead.
+
+```bash
+USE_A3S=1 ./local_setup.sh          # full local stack, A3S instead of the remote RL agent
+curl localhost:5010/api/v1/health   # {"message": "Ok"}
+```
+
+To iterate on A3S alone, run `./docker/local_setup.sh` from `a3s-service/`, then set
+`RL_AGENT_API_URL=http://host.docker.internal:5010/api/v1/recommendation` in
+`config/dev/cab-standalone/.secrets` and re-run `./docker-compose.sh` there. The same override
+connects any other agent exposing that contract, e.g. a local
+[T2.1_deep_expert](https://github.com/ainetus/T2.1_deep_expert) build. Stop A3S with `./local_stop.sh`.
+
 # Development
 
 Contributions to the InteractiveAI Assistant Platform are welcome! To contribute, please make sure to use [developer guide](docs/developer-guide.md)

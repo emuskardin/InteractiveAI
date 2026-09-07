@@ -189,6 +189,8 @@ services:
       - TZ=UTC   # Set timezone to UTC
       - RL_AGENT_API_URL=${RL_AGENT_API_URL}
       - RL_AGENT_API_TOKEN=${RL_AGENT_API_TOKEN}
+      # A3S rollouts can take tens of seconds to answer.
+      - RL_AGENT_API_TIMEOUT=${RL_AGENT_API_TIMEOUT:-120}
     command: sh -c "./entrypoint.sh"
     ports:
       - 5400:5000
@@ -196,6 +198,26 @@ services:
       - ./../../../backend/recommendation-service:/my_app
     depends_on:
       - db_postgres_recommendation
+
+  # Local A3S (agent-as-a-service) instance. Opt-in via the "a3s" profile.
+  caba3s:
+    container_name: cab_a3s
+    image: cab/caba3s
+    profiles: ["a3s"]
+    build:
+      context: ../../../a3s-service
+      dockerfile: docker/Dockerfile
+      args:
+        # Baked-in default policy; overridable via `environment:` below without a rebuild.
+        A3S_POWERGRID_AGENT: ${A3S_POWERGRID_AGENT:-t2.1}
+    restart: unless-stopped
+    environment:
+      - FLASK_APP=app:create_app('dev')
+      - TZ=UTC
+      # Which policy serves PowerGrid: "t2.1" (default) or "xd".
+      - A3S_POWERGRID_AGENT=${A3S_POWERGRID_AGENT:-t2.1}
+    ports:
+      - 5010:5010
 
   db_postgres_recommendation:
     container_name: db_postgres_recommendation
