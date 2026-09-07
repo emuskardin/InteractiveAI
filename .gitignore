@@ -198,3 +198,4 @@ go.sh
 !frontend/.vscode
 !frontend/env/
 !frontend/env/.env
+/config/dev/cab-standalone/.secrets.pre-simplify
