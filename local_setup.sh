@@ -11,12 +11,17 @@
 #   ./local_setup.sh                   # full setup (prompts if containers already run)
 #   ./local_setup.sh --clean           # tear down existing containers first, no prompt
 #   ./local_setup.sh --wipe            # tear down existing containers AND volumes, no prompt
+#   ./local_setup.sh --a3s [URL]       # take recommendations from an already-running A3S
+#                                      # (default URL http://host.docker.internal:5010/api/v1/recommendation)
+#
+# This script never starts A3S. Start it first from a3s-service/ with
+# ./docker/local_setup.sh, then pass --a3s here.
 #
 # Overridable via environment:
 #   KC_ADMIN (admin)  KC_PW (admin)  FRONTEND_URL (http://localhost:3200)
 #
-# Secrets (RL_AGENT_API_URL / RL_AGENT_API_TOKEN / VITE_COGNITIVE_TOKEN / USE_A3S)
-# are read from config/dev/cab-standalone/.secrets if present (see .secrets.example).
+# Secrets (RL_AGENT_API_URL / RL_AGENT_API_TOKEN / COGNITIVE_TOKEN) are read from
+# config/dev/cab-standalone/.secrets if present (see .secrets.example).
 
 set -euo pipefail
 
@@ -29,7 +34,9 @@ RESOURCES_DIR="$REPO_ROOT/resources"
 SIM_DIR="$REPO_ROOT/usecases_examples/PowerGrid"
 SIM_COMPOSE="docker-compose.local.yml"   # server config lives in docker-compose.yml
 SIM_PORT=5122                            # must match POWERGRID_SIMU_UPSTREAM in .env
-A3S_PORT=5010                            # host port the compose `caba3s` service publishes
+# Where --a3s points the recommendation service when no URL is given. host.docker.internal
+# is how the containers reach a service published on the host.
+A3S_DEFAULT_URL="http://host.docker.internal:5010/api/v1/recommendation"
 # Serializer name the simulator stamps into environment_state; must match what A3S accepts.
 SIM_SERIALIZER_SRC="$REPO_ROOT/usecases_examples/PowerGrid/app/models/env_serialization.py"
 
@@ -89,30 +96,22 @@ frontend_nginx_reload() {
   fi
 }
 
-# A standalone a3s-service/docker/local_setup.sh can grab port 5010 before the
-# compose `caba3s` service starts, leaving it unable to bind. Free the port,
-# unless RL_AGENT_API_URL is set explicitly (the operator is pointing elsewhere).
-free_a3s_port() {
-  [[ "${USE_A3S:-0}" == "1" ]] || return 0
-  if [[ -n "${RL_AGENT_API_URL:-}" ]]; then
-    warn "both USE_A3S=1 and RL_AGENT_API_URL are set in .secrets — the explicit URL wins"
-    warn "  using:   $RL_AGENT_API_URL"
-    warn "  cab_a3s will still be built and started, but nothing will call it"
-    warn "  for a self-contained stack, comment RL_AGENT_API_URL out and keep USE_A3S=1"
-    ok "leaving port $A3S_PORT and any standalone A3S as-is"
+# --a3s: A3S runs on its own (a3s-service/docker/local_setup.sh), so all this
+# does is point the recommendation service at it — after confirming it answers,
+# because otherwise the only symptom is an empty recommendation panel at the end
+# of a ten-minute setup.
+require_a3s() {
+  local health="${RL_AGENT_API_URL%/recommendation}/health"
+  # The containers reach it via host.docker.internal; from here it is localhost.
+  local host_health="${health/host.docker.internal/localhost}"
+  if wait_for_http "$host_health" 200 3 >/dev/null; then
+    ok "A3S is answering at $host_health"
     return 0
   fi
-  local holder
-  holder="$(docker ps --format '{{.Names}}\t{{.Ports}}' \
-             | awk -F'\t' -v p=":$A3S_PORT->" 'index($2, p) {print $1}' \
-             | grep -vx cab_a3s || true)"
-  [[ -z "$holder" ]] && return 0
-  warn "port $A3S_PORT is needed by cab_a3s but is held by container '$holder'"
-  warn "(that is the standalone A3S from a3s-service/docker/local_setup.sh — this stack builds its own)"
-  local c
-  for c in $holder; do
-    docker stop "$c" >/dev/null 2>&1 && ok "stopped '$c' to free port $A3S_PORT (start it again later if you need it)"
-  done
+  warn "no A3S answering at $host_health"
+  warn "  start it first:  cd $REPO_ROOT/a3s-service && ./docker/local_setup.sh"
+  warn "  or pass the URL: ./local_setup.sh --a3s http://host.docker.internal:<port>/api/v1/recommendation"
+  die "A3S is not running"
 }
 
 # Checks the gateway route, the RL agent, and the simulator/A3S serializer contract.
@@ -127,19 +126,7 @@ verify_recommendation_path() {
     failures=$(( failures + 1 ))
   fi
 
-  if [[ "${USE_A3S:-0}" == "1" && -z "${RL_AGENT_API_URL:-}" ]]; then
-    if ! container_running cab_a3s; then
-      warn "USE_A3S=1 but the cab_a3s container is not running"
-      warn "  check: cd $BACKEND_DIR && docker compose --profile a3s logs caba3s"
-      failures=$(( failures + 1 ))
-    elif wait_for_http "http://localhost:$A3S_PORT/api/v1/health" 200 15 >/dev/null; then
-      ok "A3S is healthy on port $A3S_PORT"
-      verify_serializer_contract cab_a3s || failures=$(( failures + 1 ))
-    else
-      warn "cab_a3s is running but not answering on port $A3S_PORT"
-      failures=$(( failures + 1 ))
-    fi
-  elif [[ -n "${RL_AGENT_API_URL:-}" ]]; then
+  if [[ -n "${RL_AGENT_API_URL:-}" ]]; then
     # Resolve from inside the recommendation container, whose network namespace RL_AGENT_API_URL targets.
     local health_url="${RL_AGENT_API_URL%/recommendation}/health"
     if container_running cab_recommendation && docker exec cab_recommendation python -c "
@@ -169,7 +156,7 @@ except Exception as e:
       failures=$(( failures + 1 ))
     fi
   else
-    warn "neither USE_A3S=1 nor RL_AGENT_API_URL is set — only the ontology recommender will run"
+    warn "RL_AGENT_API_URL is not set — only the ontology recommender will run"
   fi
 
   return "$failures"
@@ -184,7 +171,7 @@ verify_serializer_contract() {
   emitted="$(grep -oE "^${emitted} = \"[a-z0-9_]+\"" "$SIM_SERIALIZER_SRC" | sed 's/.*"\(.*\)"/\1/' | head -1)"
   [[ -n "$emitted" ]] || { warn "could not resolve the simulator's serializer constant"; return 0; }
 
-  accepted="$(docker exec "$a3s" sh -c 'grep -hoE "grid2op_observation_v[0-9]+" /my_app/agent_as_a_service/powergrid/serialization.py 2>/dev/null | sort -u' 2>/dev/null || true)"
+  accepted="$(docker exec "$a3s" sh -c 'grep -hoE "grid2op_observation_v[0-9]+" /my_app/integrations/powergrid/serialization.py 2>/dev/null | sort -u' 2>/dev/null || true)"
   if [[ -z "$accepted" ]]; then
     warn "could not read the serializers '$a3s' accepts — skipping the contract check"
     return 0
@@ -197,11 +184,7 @@ verify_serializer_contract() {
   warn "  simulator emits:      $emitted"
   warn "  '$a3s' accepts: $(tr '\n' ' ' <<<"$accepted")"
   warn "  that A3S image predates the simulator's payload format — rebuild it:"
-  if [[ "$a3s" == "cab_a3s" ]]; then
-    warn "    cd $BACKEND_DIR && docker compose --profile a3s up -d --build --force-recreate caba3s"
-  else
-    warn "    cd $REPO_ROOT/a3s-service && ./docker/local_setup.sh --rebuild"
-  fi
+  warn "    cd $REPO_ROOT/a3s-service && ./docker/local_setup.sh --rebuild"
   return 1
 }
 
@@ -312,14 +295,20 @@ handle_existing_containers() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-  local CLEAN_MODE=""
-  for arg in "$@"; do
-    case "$arg" in
+  # Deliberately not named USE_A3S: .secrets is sourced into this scope below,
+  # and an old `export USE_A3S=1` there would silently turn this flag on.
+  local CLEAN_MODE="" A3S_MODE=0 A3S_URL=""
+  while (( $# )); do
+    case "$1" in
       --clean)   CLEAN_MODE="clean" ;;
       --wipe)    CLEAN_MODE="wipe" ;;
-      -h|--help) sed -n '3,26p' "${BASH_SOURCE[0]}"; exit 0 ;;
-      *)         die "unknown argument: $arg (see --help)" ;;
+      # --a3s takes an optional URL: anything that is not another flag.
+      --a3s)     A3S_MODE=1
+                 [[ "${2:-}" == -* || -z "${2:-}" ]] || { A3S_URL="$2"; shift; } ;;
+      -h|--help) sed -n '3,24p' "${BASH_SOURCE[0]}"; exit 0 ;;
+      *)         die "unknown argument: $1 (see --help)" ;;
     esac
+    shift
   done
 
   log "Checking prerequisites"
@@ -327,8 +316,8 @@ main() {
   docker compose version >/dev/null 2>&1 || die "'docker compose' (v2) is required."
   ok "docker, docker compose, curl, python3 present"
 
-  # Source .secrets in THIS shell (docker-compose.sh sources it in a subshell),
-  # so USE_A3S is visible to the rebuild check further down.
+  # Source .secrets in THIS shell too (docker-compose.sh sources it in a
+  # subshell), so the verification step below knows which agent is configured.
   if [[ -f "$BACKEND_DIR/.secrets" ]]; then
     # shellcheck disable=SC1091  # path is runtime-resolved, gitignored
     source "$BACKEND_DIR/.secrets"
@@ -337,27 +326,28 @@ main() {
     warn "copy .secrets.example to .secrets to override (see docker-compose.sh)"
   fi
 
+  # --a3s wins over whatever .secrets says: it is the more explicit statement of
+  # where recommendations come from for this run. docker-compose.sh sources
+  # .secrets in its own shell, so export it rather than just setting it.
+  if (( A3S_MODE )); then
+    log "Using A3S for recommendations"
+    export RL_AGENT_API_URL="${A3S_URL:-$A3S_DEFAULT_URL}"
+    require_a3s
+    ok "recommendation service will call $RL_AGENT_API_URL"
+  fi
+
   log "Checking for existing containers"
   handle_existing_containers "$CLEAN_MODE"
-
-  log "Checking the A3S port is available"
-  free_a3s_port
-  ok "port $A3S_PORT ready for cab_a3s"
 
   log "Step 1/6 — Starting the InteractiveAI backend"
   ( cd "$BACKEND_DIR" && ./docker-compose.sh )
   ok "backend compose brought up"
 
-  # Force a rebuild from this repo's source (docker-compose.sh's `up -d` reuses
-  # existing images as-is); caba3s only when USE_A3S=1 brought it up.
-  local rebuild=(frontend cabrecommendation) profile=()
-  if [[ "${USE_A3S:-0}" == "1" ]]; then
-    rebuild+=(caba3s)
-    profile=(--profile a3s)
-  fi
-  log "Rebuilding ${rebuild[*]} from this repo's source"
-  ( cd "$BACKEND_DIR" && docker compose "${profile[@]}" up -d --build --force-recreate "${rebuild[@]}" )
-  ok "${rebuild[*]} rebuilt from source"
+  # Force a rebuild from this repo's source: docker-compose.sh's `up -d` reuses
+  # existing images as-is, so edits here would otherwise not reach the containers.
+  log "Rebuilding frontend and cabrecommendation from this repo's source"
+  ( cd "$BACKEND_DIR" && docker compose up -d --build --force-recreate frontend cabrecommendation )
+  ok "frontend, cabrecommendation rebuilt from source"
 
   log "Step 2/6 — Waiting for Keycloak"
   wait_for_http "$KC_BASE/realms/master" 200 || die "Keycloak did not come up on :89"
