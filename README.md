@@ -22,10 +22,12 @@ _Backend_
       <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#setting-up-the-environment">Setting Up the Environment</a></li>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#configuration">Configuration</a></li>
+        <li><a href="#manual-setup">Manual setup</a></li>
+        <li><a href="#the-powergrid-expert-agent-api">The PowerGrid expert agent API</a></li>
       </ul>
     </li>
-    <li><a href="#usage">Usage</a></li>
     <li><a href="#development">Development</a></li>
     <li><a href="#docs">Docs</a></li>
 
@@ -48,164 +50,114 @@ The platform uses the project **OperatorFabric** for notification management.
 
 ### Prerequisites
 
-- [Git (version 2.40.1)](https://git-scm.com/)
-- [Docker Engine (version 27)](https://www.docker.com/)
-- [Docker Compose V2](https://www.docker.com/) 
+- Git, Docker Engine 27+, Docker Compose V2, `curl`, `python3`
 
-
-### Setting Up the Environment
-
-Clone the repo of the assistant
+### Install
 
 ```sh
-git clone [repo-url]
+git clone [repo-url] && cd InteractiveAI
+cp config/dev/cab-standalone/.secrets.example config/dev/cab-standalone/.secrets
+# edit .secrets — at minimum RL_AGENT_API_URL / RL_AGENT_API_TOKEN, see "Configuration"
+./local_setup.sh
 ```
 
-## Usage
-
-InteractiveAI offers versatile deployment options, leveraging either Docker or Kubernetes. The primary method entails initiating InteractiveAI via Docker to launch all services concurrently. However, recognizing potential resource strain in this mode, we've introduced alternative configurations. These configurations enable selective startup of essential services with minimal dependencies, catering to streamlined versions of certain APIs.
-Below are the steps to start all services. For other methods, please consult the developer guide.
-
-### Running All Services (Dev Mode)
-
-1. **Set-up environment variables**
-
-Configuration is read from a gitignored `.secrets` file that `docker-compose.sh` sources.
-Copy the template and fill in your values:
+To use the local [A3S](a3s-service/README.md) service instead of a remote RL agent,
+start it first and add `--a3s` — no `.secrets` change needed:
 
 ```sh
-cd config/dev/cab-standalone
-cp .secrets.example .secrets
-# then edit .secrets
+cd a3s-service && ./docker/local_setup.sh && cd ..   # see a3s-service/README.md
+./local_setup.sh --a3s
 ```
 
-Key variables (see `.secrets.example` for all options and per-environment values):
+`local_setup.sh` starts the backend, configures Keycloak, loads the OperatorFabric
+resources, rebuilds the frontend and recommendation service from this source tree,
+builds and starts the PowerGrid simulator, and verifies the recommendation path end
+to end. It prints the URLs and credentials when it is done.
 
-- `VITE_POWERGRID_SIMU` — the frontend's simulator endpoint. Use the same-origin proxy
-  value `/powergrid-simu` (avoids CORS); set it to `false` to disable the PowerGrid UI.
+| Flag | Effect |
+| --- | --- |
+| *(none)* | full setup; asks what to do if containers from a previous run are up |
+| `--clean` | tear those containers down first, no prompt |
+| `--wipe` | tear down containers **and** volumes, no prompt |
+| `--a3s [URL]` | take recommendations from an already-running [A3S](a3s-service/README.md); default URL `http://host.docker.internal:5010/api/v1/recommendation` |
+
+It never starts A3S — start that yourself first, or `--a3s` aborts before touching
+any container.
+
+Then log in at http://localhost:3200 as `powergrid_user` / `test`, and in the
+simulator (http://localhost:5122) pick server `http://host.docker.internal:3200/`.
+Stop everything with `./local_stop.sh` (`--wipe` to drop the data volumes too).
+
+The last step prints a warning for anything it could not verify — a stale nginx
+upstream, an unreachable agent, a simulator/A3S payload mismatch. The UI still comes
+up; the PowerGrid recommendation panel is what stays empty.
+
+### Configuration
+
+Everything lives in `config/dev/cab-standalone/.secrets` (gitignored,
+`docker-compose.sh` sources it). The values that matter:
+
+- `RL_AGENT_API_URL` / `RL_AGENT_API_TOKEN` — the agent producing PowerGrid
+  recommendations. Options:
+  - the **deep expert agent** on this host: `http://host.docker.internal:5123/api/v1/recommendation`
+    (see [below](#the-powergrid-expert-agent-api)); it requires a token
+  - the hosted one: `https://interactiveagent.passerelle.irt-systemx.fr/api/v1/recommendation`,
+    also with a token
+  - a local **[A3S](a3s-service/README.md)** — no token, and no need to set the URL:
+    `./local_setup.sh --a3s` overrides it for that run
+- `POWERGRID_SIMU_UPSTREAM` — where nginx forwards `/powergrid-simu/`. Local dev:
+  `http://host.docker.internal:5122/`.
+- `VITE_POWERGRID_SIMU` — the frontend's simulator endpoint; keep the same-origin
+  proxy value `/powergrid-simu` (avoids CORS), or `false` to hide the PowerGrid UI.
   `VITE_RAILWAY_SIMU` / `VITE_ATM_SIMU` are the equivalents for the other use cases.
-- `POWERGRID_SIMU_UPSTREAM` — where nginx actually forwards `/powergrid-simu/`:
-  - Local dev : `http://host.docker.internal:5122/` (simulator container on the host)
-  - LAN       : `http://192.168.208.61:5100/`
-  - Public/k8s: same variable, set as an env var on the **frontend pod** (see
-    `deploy-chart/values.ovh.yaml`).
-- `COGNITIVE_TOKEN` — bearer token for the INESCTEC cognitive API. nginx attaches it to
-  every `/cognitive-api/` request, so the frontend never sees it. It used to be
-  `VITE_COGNITIVE_TOKEN`, a build-time value inlined into the public JS bundle; that meant
-  any visitor could read it and rotating it required a full image rebuild.
-- `RL_AGENT_API_URL` / `RL_AGENT_API_TOKEN` — the deep expert agent that powers PowerGrid
-  recommendations (see [The PowerGrid expert agent API](#the-powergrid-expert-agent-api) below to
-  install it). A token is required in every mode:
-  - Local dev : `http://host.docker.internal:5123/api/v1/recommendation` (agent on the host)
-  - Server    : `http://192.168.208.61:5000/api/v1/recommendation`
-  - Public    : `https://interactiveagent.passerelle.irt-systemx.fr/api/v1/recommendation`
+- `COGNITIVE_TOKEN` — bearer token for the INESCTEC cognitive API. nginx attaches it
+  to every `/cognitive-api/` request, so it never reaches the browser. Empty is fine
+  locally; you just lose that panel.
 
-> **_NOTE:_** `host.docker.internal` lets the containers reach services (simulator, expert agent)
-> running on the host — this is how local dev connects to them. Make sure those host services
-> listen on `0.0.0.0` (not only `127.0.0.1`) so the containers can reach them.
->
-> **_NOTE:_** For the simulator itself, you can use the example we provide — follow the tutorial
-> in [InteractiveAI/usecases_examples/PowerGrid/](/usecases_examples/PowerGrid/README.md).
->
-> 
-### How runtime nginx configuration works
+`host.docker.internal` is how the containers reach services on the host (simulator,
+agent). Those services must listen on `0.0.0.0`, not only `127.0.0.1`.
 
-`POWERGRID_SIMU_UPSTREAM` and `COGNITIVE_TOKEN` are **runtime** values, not
-build-time ones. They appear in the nginx config as `__NAME__` placeholders, and
-`frontend/start-webui.sh` substitutes them from the matching env var when the container
-starts. Changing one is: update the env var (or the k8s secret) and restart the
-frontend — no image rebuild.
+If you hit CORS errors (the platform running without HTTPS), start a Chromium
+browser with `--disable-web-security --user-data-dir="[some directory]"`.
 
-To add another: give it a default in `start-webui.sh`, append its name to `SUBST_VARS`, and
-use `__NAME__` in the config. If a placeholder survives substitution the container exits
-with the name of the missing variable, and the generated config is checked with `nginx -t`
-before the daemon starts — so a misconfiguration fails loudly at startup instead of
-producing a silently broken proxy.
+Anything else: [troubleshooting guide](docs/troubleshooting.md).
 
-`REQUIRED_VARS` (space- or comma-separated) lists the variables that must be **non-empty**;
-an empty one aborts startup. It is opt-in because an absent value is not always wrong —
-local dev runs the whole stack with no cognitive token and just loses that panel — whereas
-on a public deploy an empty token means nginx sends `Bearer ` with nothing after it and
-every `/cognitive-api/` call 401s while the pod still reports itself healthy.
-`deploy-chart/values.ovh.yaml` therefore sets `REQUIRED_VARS=COGNITIVE_TOKEN`, so the pod
-crashloops with the reason in its log and k8s keeps the previous pod serving.
+### Manual setup
 
-Two ordering rules follow from all of this, and breaking the first is what silently broke
-`/cognitive-api/` once already:
+The same steps by hand, in order. `local_setup.sh` does all of them for you — use
+this only when you need to run one in isolation.
 
-- **Never push a conf ahead of the pod that has to substitute it.** A placeholder the
-  running image does not know is left in the config *literally* and goes out in the proxied
-  request. `deploy-chart/apply-nginx-conf.sh` now refuses to push in that case: it checks
-  every `__NAME__` in the conf against the deployment's env, and resolves `secretKeyRef`s
-  to confirm the secret and key actually exist.
-- **Verify the config nginx loaded, not the ConfigMap.** nginx runs with an explicit
-  `-c /personal-conf/nginx.conf`; a bare `nginx -T` re-reads `/etc/nginx/nginx.conf` and the
-  raw ConfigMap mount, where `proxy_pass __POWERGRID_SIMU_UPSTREAM__;` is not a valid URL —
-  so it exits non-zero and prints nothing, which reads as a missing location.
+1. **Backend** — `cd config/dev/cab-standalone && ./docker-compose.sh`
+   (it writes `.env` from `.secrets` and brings the compose project up).
+2. **Rebuild from source** — `docker compose up -d --build --force-recreate frontend
+   cabrecommendation`, in the same directory. Step 1 reuses existing images, so
+   without this your local changes are not in the running containers.
+3. **Keycloak** — in the admin console (http://localhost:89/auth/admin,
+   `admin`/`admin`), realm `dev`: set **Realm Settings → Frontend URL** to
+   `http://localhost:3200/`, and add `http://localhost:3200/*` to
+   **Clients → opfab-client → Valid Redirect URIs**.
+4. **Restart the frontend** — `docker restart frontend`, so it picks up that change.
+   Required before the next step.
+5. **Resources** — `cd resources && ./loadTestConf.sh` (registers the use cases).
+6. **Simulator** — `cd usecases_examples/PowerGrid && docker compose -f
+   docker-compose.local.yml up -d --build app`. Use the `.local` compose file: the
+   default one is the server config and binds the wrong port. See its
+   [README](/usecases_examples/PowerGrid/README.md).
+7. **Reload the gateway** — `docker exec frontend nginx -c /personal-conf/nginx.conf
+   -s reload`. nginx caches upstream IPs at load, so containers recreated after it
+   started answer 502 until this is done.
 
-Two things to keep in mind:
+Check it: `curl localhost:3200/cab_recommendation/api/v1/health` should answer 200,
+and the recommendation service must be able to reach `RL_AGENT_API_URL` from inside
+its own container.
 
-- **In k8s the config does not come from the image.** The `cab-assistant-platform-config`
-  ConfigMap is mounted over `/etc/nginx/conf.d` and **overrides** the `default.conf` baked
-  into the image, so every placeholder and every `location` must be present in the ConfigMap
-  too (`deploy-chart/apply-nginx-conf.sh` pushes just that key). A missing
-  `/powergrid-simu/` location, for instance, lets the apply POST fall through to the static
-  `location /`, and nginx answers 405.
-- **nginx reads `conf.d` only at startup**, so restart the frontend after any change:
-  `kubectl -n cab rollout restart deploy/cab-frontend`.
-
-2. **Run InteractiveAI assistant**
-```sh
-cd config/dev/cab-standalone
-./docker-compose.sh
-```
-> **_NOTE:_** You will see the word cab on most files in the project. Note that it was the initial project name of InteractiveAI. Might be updated later. 
-
-3. **Setting up Keycloak `Frontend URL`**  
-    * Access Keycloak Interface: 
-      - Ensure that your Keycloak instance is running and accessible.
-      - Open a web browser and navigate to the Keycloak admin console, typically available at `http://localhost:89/auth/admin`.  
-    * Login to Keycloak Admin Console: 
-      - Log in to the Keycloak admin console using your administrator credentials (`admin:admin` by default)
-    * Configure frontendUrl:
-      - On the Keycloak admin console, locate and click on the "Realm Settings" section.
-      - In the Frontend URL field, add the URL of InteractiveAI frontend. If your frontend is hosted locally for development purposes, you might add `http://localhost:3200/`.
-      - After adding the frontend URL, save the changes.
-    * Configure Valid Redirect URIs:
-      - On the Keycloak admin console, locate and click on the "Clients" section.
-      - Select the client (opfab-client).  
-      - Within the client settings, look for the "Valid Redirect URIs" field.
-      - Add the URL of the frontend with /*, if it's local deployment: `http://localhost:3200/*`.
-      - After adding the Valid Redirect URIs, save the changes to update the client settings.
-
-
-4. **Load resources**
-
-**WARNING:** You need to restart the frontend after updating the URL on keycloak do it before loading the resources. 
-```sh
-docker restart frontend
-```
-
-```sh
-cd resources
-./loadTestConf.sh
-```
-
-5. If you encounter CORS errors (which can happen if you start the platform in a non-HTTPS environment), you can start your browser with security mode disabled.
-
-```sh
-your-chromium-browser --disable-web-security --user-data-dir="[some directory here]" # replace your-chromium-browser with your browser
-```
-
-> **_NOTE:_** If you encounter any issues, please refer to our [troubleshooting guide](docs/troubleshooting.md).
+> **_NOTE:_** `cab` appears all over the project — it was the original name of
+> InteractiveAI.
 
 ### The PowerGrid expert agent API
 
-PowerGrid recommendations are produced by a separate service — the **deep expert agent**. The
-`cab_recommendation` service calls it at `RL_AGENT_API_URL`, so it must be running (and reachable)
-for recommendations to appear in InteractiveAI.
-
-1. Clone the agent repository and check out the API branch:
+`cab_recommendation` calls the deep expert agent at `RL_AGENT_API_URL`, so that agent
+must be running for recommendations to appear.
 
 ```sh
 git clone https://github.com/ainetus/T2.1_deep_expert.git
@@ -213,23 +165,17 @@ cd T2.1_deep_expert
 git checkout feat/api-auth-compose
 ```
 
-2. Start it by following that repository's README (the `feat/api-auth-compose` branch ships a
-   Docker Compose and adds token authentication). For local development:
-   - expose it on port **5123**, and
-   - make it listen on `0.0.0.0` (not only `127.0.0.1`) so the InteractiveAI containers can reach
-     it through `host.docker.internal`.
-
-3. Point InteractiveAI at it in `config/dev/cab-standalone/.secrets`, with a token that matches
-   the one the agent expects:
+Start it per that repo's README (that branch ships a Docker Compose and token auth),
+on port **5123** and bound to `0.0.0.0`. Then set in `.secrets`:
 
 ```sh
 export RL_AGENT_API_URL=http://host.docker.internal:5123/api/v1/recommendation
 export RL_AGENT_API_TOKEN=<token configured in the expert agent>
 ```
 
-Then (re)run `./docker-compose.sh` so `cab_recommendation` picks up the values. For the LAN and
-public deployments, use the corresponding `RL_AGENT_API_URL` from step 1 of
-[Running All Services](#running-all-services-dev-mode) instead.
+The local alternative is [A3S](a3s-service/README.md), which serves the same API and
+can project KPIs several timesteps ahead: start it from `a3s-service/` with
+`./docker/local_setup.sh`, then run `./local_setup.sh --a3s` here.
 
 ### Default ports
 
@@ -244,6 +190,7 @@ Companion services for the PowerGrid use case run on the host (local dev) and ar
 containers via `host.docker.internal`:
 * PowerGrid simulator (provided example): 5122
 * PowerGrid expert agent API: 5123
+* A3S (if used instead of the expert agent): 5010
 
 ### Authentication data
 
@@ -261,22 +208,6 @@ Some examples of credentials:
 
 
 By default, the system allows the user to be connected only from a single machine. Which means if you try to connect using the same credentials from another machine, you will be disconnected on the first machine. 
-
-### OPTIONAL: connecting a local A3S service
-
-[A3S](a3s-service/README.md) is a local drop-in replacement for the external RL agent API,
-also able to project KPIs several timesteps ahead.
-
-```bash
-USE_A3S=1 ./local_setup.sh          # full local stack, A3S instead of the remote RL agent
-curl localhost:5010/api/v1/health   # {"message": "Ok"}
-```
-
-To iterate on A3S alone, run `./docker/local_setup.sh` from `a3s-service/`, then set
-`RL_AGENT_API_URL=http://host.docker.internal:5010/api/v1/recommendation` in
-`config/dev/cab-standalone/.secrets` and re-run `./docker-compose.sh` there. The same override
-connects any other agent exposing that contract, e.g. a local
-[T2.1_deep_expert](https://github.com/ainetus/T2.1_deep_expert) build. Stop A3S with `./local_stop.sh`.
 
 # Development
 

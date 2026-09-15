@@ -45,13 +45,14 @@ echo "HOST_IP=${HOST_IP}" >> .env
 
 # Secrets — sourced from .secrets if present (gitignored), otherwise from shell env
 # In CI these are injected by GitHub Actions as environment variables.
+# An RL_AGENT_API_URL already in the environment wins over the file: that is how
+# `local_setup.sh --a3s` points this stack at a running A3S without editing
+# .secrets, and it would otherwise be silently overwritten here.
+_ENV_RL_AGENT_API_URL="${RL_AGENT_API_URL:-}"
 if [[ -f .secrets ]]; then
   source .secrets
 fi
-# USE_A3S=1 points RL_AGENT_API_URL at the local A3S service, unless already set.
-if [[ "${USE_A3S:-0}" == "1" && -z "${RL_AGENT_API_URL:-}" ]]; then
-  RL_AGENT_API_URL="http://caba3s:5010/api/v1/recommendation"
-fi
+RL_AGENT_API_URL="${_ENV_RL_AGENT_API_URL:-${RL_AGENT_API_URL:-}}"
 echo "RL_AGENT_API_URL=${RL_AGENT_API_URL:-https://interactiveagent.passerelle.irt-systemx.fr/api/v1/recommendation}" >> .env
 echo "RL_AGENT_API_TOKEN=${RL_AGENT_API_TOKEN:-}" >> .env
 echo "VITE_POWERGRID_SIMU=${VITE_POWERGRID_SIMU:-/powergrid-simu}" >> .env
@@ -63,8 +64,4 @@ echo "COGNITIVE_TOKEN=${COGNITIVE_TOKEN:-}" >> .env
 # terminal (and in any CI log that runs this script).
 sed -E 's/^([A-Z_]*(TOKEN|SECRET|PASSWORD)[A-Z_]*)=(.+)$/\1=<set>/; s/^([A-Z_]*(TOKEN|SECRET|PASSWORD)[A-Z_]*)=$/\1=<empty>/' .env
 
-if [[ "${USE_A3S:-0}" == "1" ]]; then
-  docker compose --profile a3s up -d
-else
-  docker compose up -d
-fi
+docker compose up -d
