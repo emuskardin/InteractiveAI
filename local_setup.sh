@@ -395,7 +395,7 @@ main() {
   printf '\n\033[1;32mSetup complete.\033[0m\n\n'
   # powergrid_user is provisioned with the PowerGrid entity; publisher_test isn't.
   printf '  InteractiveAI UI      %s        (powergrid_user / test)\n' "$(link "$FRONTEND_URL")"
-  printf '  PowerGrid simulator   %s        (also proxied same-origin at %s/powergrid-simu/)\n' "$(link "http://localhost:$SIM_PORT")" "$FRONTEND_URL"
+  printf '  PowerGrid simulator   %s        (powergrid_user / test) (also proxied same-origin at %s/powergrid-simu/)\n' "$(link "http://localhost:$SIM_PORT")" "$FRONTEND_URL"
   printf '  Keycloak admin        %s   (admin / admin)\n' "$(link "$KC_BASE/admin")"
   printf '\n  In the simulator, pick server  %s  and log in.\n' "$(link "http://host.docker.internal:3200/")"
 }
